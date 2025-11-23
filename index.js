@@ -34,6 +34,6 @@ app.post("/rtcToken", (req, res) => {
 
 app.get("/", (_, res) => res.send("RTC Token Server OK"));
 
-app.listen(process.env.PORT || 3000, () => {
+app.listen(process.env.PORT, () => {
   console.log("RTC Token server running on port", process.env.PORT || 3000);
 });
