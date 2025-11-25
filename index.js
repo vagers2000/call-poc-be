@@ -52,3 +52,14 @@ app.get('/token', (req, res) => {
 app.listen(PORT, () => {
   console.log(`Token server running on port ${PORT}`);
 });
+
+
+// curl -H "Accept: application/json" \
+    //  "https://call-poc-be-production.up.railway.app/token?channel=test&uid=1"
+
+//     {
+//   "token": "006123cb3e3c5014c51959c81444753e620IADv+2tNe9OjwFvlyUv9nTtnxITwZFPdDT9rDwebWA5fpgx+f9i379yDIgA/FjfoRtYmaQQAAQAehyVpAgAehyVpAwAehyVpBAAehyVp",
+//   "channelName": "test",
+//   "uid": "1",
+//   "expires_in": 600
+// }
