@@ -7,6 +7,7 @@ const ALLOWED_ORIGINS = [
   "https://flirtbate.web.app",
   "http://localhost:5173",
   "http://localhost:3000",
+  "http://localhost:51847",
   "https://your-other-frontend.com"
 ];
 
