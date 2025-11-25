@@ -2,31 +2,6 @@ import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
 
-// List ALL the exact origins your web apps will use
-const ALLOWED_ORIGINS = [
-  "https://flirtbate.web.app",
-  "http://localhost:5173",
-  "http://localhost:3000",
-  // "https://another-allowed-domain.com"
-];
-
-// CORS: always set headers so browser knows backend is CORS-ready
-function setCorsHeaders(req, res) {
-  // Always echo 'Origin' if present in list; otherwise wildcard for non-browser (Postman/mobile)
-  const origin = req.headers.origin;
-  if (origin && ALLOWED_ORIGINS.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    // If credentials = true, must NOT use '*'
-    res.setHeader("Access-Control-Allow-Credentials", "true");
-  } else {
-    // For native mobile/Postman or testing, safe fallback
-    res.setHeader("Access-Control-Allow-Origin", "*");
-  }
-  res.setHeader("Vary", "Origin"); // informs caches CORS is per-origin
-  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
-}
-
 if (!getApps().length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   initializeApp({ credential: cert(serviceAccount) });
@@ -34,27 +9,44 @@ if (!getApps().length) {
 const db = getFirestore();
 const messaging = getMessaging();
 
+// Call this FIRST in every request; echoes any Origin for web, * for mobile/postman
+function setCorsHeaders(req, res) {
+  const origin = req.headers.origin;
+  if (origin) {
+    // For any browser request, echo the actual origin (works for all dev/prod web)
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Access-Control-Allow-Credentials", "true");
+  } else {
+    // Native, Postman, etc: allow all
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  }
+  res.setHeader("Vary", "Origin");
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+}
+
 export default async function handler(req, res) {
   setCorsHeaders(req, res);
 
-  // Respond to preflight
+  // Respond to preflight (CORS) OPTIONS request
   if (req.method === "OPTIONS") {
-    // End preflight with correct headers
     return res.status(204).end();
   }
 
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return res.status(405).json({ error: "Method not alloweddd" });
   }
 
   try {
     const { callId, channelName, callerUid, callerName, recipientId } = req.body;
     if (!callId || !channelName || !callerUid || !recipientId) {
+      setCorsHeaders(req, res);
       return res.status(400).json({ error: "Missing required fields" });
     }
 
     const recipientDoc = await db.collection("users").doc(recipientId).get();
     if (!recipientDoc.exists) {
+      setCorsHeaders(req, res);
       return res.status(404).json({ error: "Recipient not found" });
     }
 
@@ -63,7 +55,7 @@ export default async function handler(req, res) {
     const voipToken = recipientData?.voipToken;
     const platform = recipientData?.platform || "android";
 
-    // Create call doc
+    // Write call doc
     await db.collection("calls").doc(callId).set({
       callId,
       channelName,
@@ -74,14 +66,14 @@ export default async function handler(req, res) {
       timestamp: Date.now(),
     });
 
-    // VoIP Push for iOS (if available)
+    // VoIP Push
     if (platform === "ios" && voipToken) {
       const voipMessage = {
         token: voipToken,
         data: { callId, channelName, callerUid, callerName, type: "voip_incoming_call" },
         apns: {
           headers: {
-            "apns-topic": "com.example.agora_callkit_video_call.voip", // Replace with your iOS bundle ID
+            "apns-topic": "com.example.agora_callkit_video_call.voip", // Change as needed
             "apns-push-type": "voip",
             "apns-priority": "10",
           },
@@ -103,7 +95,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // FCM Push
+    // FCM
     if (fcmToken) {
       const fcmMessage = {
         token: fcmToken,
@@ -154,7 +146,8 @@ export default async function handler(req, res) {
 
     return res.json({ success: true });
   } catch (err) {
+    setCorsHeaders(req, res); // Ensure headers even on error
     console.error(err);
-    return res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message || "Internal server error" });
   }
 }
