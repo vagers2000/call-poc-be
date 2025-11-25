@@ -185,7 +185,7 @@ export default async function handler(req, res) {
         token: fcmToken,
         notification: { title: `${callerName || callerUid} is calling`, body: "Tap to answer video call" },
         data: { callId, channelName, callerUid, callerName: callerName || callerUid, type: "incoming_call", click_action: "FLUTTER_NOTIFICATION_CLICK" },
-        android: { priority: "high", notification: { channelId: "calls", priority: "max", tag: callId, clickAction: "FLUTTER_NOTIFICATION_CLICK", visibility: "public", sound: "default" }, ttl: 60000 },
+        android: { priority: "high", notification: { channelId: "calls", priority: "max", tag: callId, click_action: "FLUTTER_NOTIFICATION_CLICK", visibility: "public", sound: "default" }, ttl: 60000 },
         apns: { headers: { "apns-priority": "10" }, payload: { aps: { alert: { title: `${callerName || callerUid} is calling`, body: "Tap to answer video call" }, badge: 1, sound: "default", category: "CALL_CATEGORY", "content-available": 1 } } },
       };
       try {
