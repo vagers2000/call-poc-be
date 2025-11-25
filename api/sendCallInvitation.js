@@ -2,31 +2,29 @@ import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
 
-// List allowed origins, add your production and dev origins here
+// List ALL the exact origins your web apps will use
 const ALLOWED_ORIGINS = [
   "https://flirtbate.web.app",
   "http://localhost:5173",
   "http://localhost:3000",
-  "http://localhost:51847",
-  "https://your-other-frontend.com"
+  // "https://another-allowed-domain.com"
 ];
 
-function setCorsHeaders(res, origin) {
-  // If origin is in allowed list, echo it; else reject
+// CORS: always set headers so browser knows backend is CORS-ready
+function setCorsHeaders(req, res) {
+  // Always echo 'Origin' if present in list; otherwise wildcard for non-browser (Postman/mobile)
+  const origin = req.headers.origin;
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
+    // If credentials = true, must NOT use '*'
+    res.setHeader("Access-Control-Allow-Credentials", "true");
   } else {
-    // For requests without Origin (e.g., native apps) or unlisted origin, allow all
-    // or restrict here by returning false
+    // For native mobile/Postman or testing, safe fallback
     res.setHeader("Access-Control-Allow-Origin", "*");
-    // If you want strict, uncomment next to reject unapproved origin
-    // return false;
   }
-  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Vary", "Origin"); // informs caches CORS is per-origin
+  res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader("Access-Control-Expose-Headers", "Authorization,Content-Length");
-  return true;
 }
 
 if (!getApps().length) {
@@ -37,16 +35,11 @@ const db = getFirestore();
 const messaging = getMessaging();
 
 export default async function handler(req, res) {
-  const origin = req.headers.origin;
+  setCorsHeaders(req, res);
 
-  const corsAllowed = setCorsHeaders(res, origin);
-  if (corsAllowed === false) {
-    // Block disallowed origins if strict
-    return res.status(403).json({ error: "CORS origin denied" });
-  }
-
+  // Respond to preflight
   if (req.method === "OPTIONS") {
-    // Preflight request
+    // End preflight with correct headers
     return res.status(204).end();
   }
 
@@ -56,7 +49,6 @@ export default async function handler(req, res) {
 
   try {
     const { callId, channelName, callerUid, callerName, recipientId } = req.body;
-
     if (!callId || !channelName || !callerUid || !recipientId) {
       return res.status(400).json({ error: "Missing required fields" });
     }
@@ -71,6 +63,7 @@ export default async function handler(req, res) {
     const voipToken = recipientData?.voipToken;
     const platform = recipientData?.platform || "android";
 
+    // Create call doc
     await db.collection("calls").doc(callId).set({
       callId,
       channelName,
@@ -81,13 +74,14 @@ export default async function handler(req, res) {
       timestamp: Date.now(),
     });
 
+    // VoIP Push for iOS (if available)
     if (platform === "ios" && voipToken) {
       const voipMessage = {
         token: voipToken,
         data: { callId, channelName, callerUid, callerName, type: "voip_incoming_call" },
         apns: {
           headers: {
-            "apns-topic": "com.example.agora_callkit_video_call.voip", // Your iOS bundle ID
+            "apns-topic": "com.example.agora_callkit_video_call.voip", // Replace with your iOS bundle ID
             "apns-push-type": "voip",
             "apns-priority": "10",
           },
@@ -109,6 +103,7 @@ export default async function handler(req, res) {
       }
     }
 
+    // FCM Push
     if (fcmToken) {
       const fcmMessage = {
         token: fcmToken,
