@@ -1,6 +1,6 @@
 import { RtcTokenBuilder, RtcRole } from "agora-access-token";
 
-const ALLOWED_ORIGINS = ["https://call-poc-be-git-main-vgs-projects-ca85a81a.vercel.app", "http://localhost:5173"]; // change as needed
+const ALLOWED_ORIGINS = ["https://flirtbate.web.app", "http://localhost:5173"]; // change as needed
 
 function setCorsHeaders(res, origin) {
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
