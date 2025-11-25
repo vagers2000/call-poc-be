@@ -1,39 +1,54 @@
-require("dotenv").config();
-const express = require("express");
-const bodyParser = require("body-parser");
-const cors = require("cors");
-const { RtcTokenBuilder, RtcRole } = require("agora-token");
+// server.js
+require('dotenv').config();
+const express = require('express');
+const cors = require('cors');
+const { RtcTokenBuilder, RtcRole } = require('agora-access-token');
 
 const app = express();
 app.use(cors());
-app.use(bodyParser.json());
+app.use(express.json());
 
-app.post("/rtcToken", (req, res) => {
-  const { userId, channelName } = req.body;
+const APP_ID = process.env.AGORA_APP_ID;
+const APP_CERT = process.env.AGORA_APP_CERT;
+const PORT = process.env.PORT || 3000;
 
-  if (!channelName) {
-    return res.status(400).json({ error: "channelName required" });
+if (!APP_ID || !APP_CERT) {
+  console.error('Missing AGORA_APP_ID or AGORA_APP_CERTIFICATE in env');
+  process.exit(1);
+}
+
+// simple health check
+app.get('/', (req, res) => res.json({ status: 'ok' }));
+
+// GET /token?channel=<channel>&uid=<uid>
+app.get('/token', (req, res) => {
+  try {
+    const channelName = req.query.channel;
+    const uidStr = req.query.uid || '0';
+    if (!channelName) return res.status(400).json({ error: 'channel required' });
+
+    const uid = uidStr === '0' ? 0 : parseInt(uidStr, 10);
+    const role = RtcRole.PUBLISHER;
+    const expirationSeconds = parseInt(process.env.TOKEN_EXPIRY_SECONDS || '600', 10); // default 600s
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    const privilegeExpiredTs = currentTimestamp + expirationSeconds;
+
+    const token = RtcTokenBuilder.buildTokenWithUid(
+      APP_ID,
+      APP_CERT,
+      channelName,
+      uid,
+      role,
+      privilegeExpiredTs
+    );
+
+    return res.json({ token, channelName, uid: uidStr, expires_in: expirationSeconds });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
   }
-
-  const uid = parseInt(userId || "0", 10); // 0 lets Agora assign uid
-  const expireSeconds = 3600;
-  const now = Math.floor(Date.now() / 1000);
-  const privilegeExpire = now + expireSeconds;
-
-  const token = RtcTokenBuilder.buildTokenWithUid(
-    process.env.AGORA_APP_ID,
-    process.env.AGORA_APP_CERT,
-    channelName,
-    uid,
-    RtcRole.PUBLISHER,
-    privilegeExpire
-  );
-
-  return res.json({ rtcToken: token, uid, expireAt: privilegeExpire });
 });
 
-app.get("/", (_, res) => res.send("RTC Token Server OK"));
-
-app.listen(process.env.PORT, () => {
-  console.log("RTC Token server running on port", process.env.PORT || 3000);
+app.listen(PORT, () => {
+  console.log(`Token server running on port ${PORT}`);
 });
