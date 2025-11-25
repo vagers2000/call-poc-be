@@ -35,11 +35,103 @@ export default async function handler(req, res) {
       timestamp: Date.now()
     });
 
-    // If you also want to add push, put here: (very similar to your previous functions)
-    // (Omitted for brevity; see your previous sendFCMPush/sendVoIPPush)
+    if (platform === "ios" && voipToken) {
+    await sendVoIPPush(voipToken, callId, channelName, callerUid, callerName);  
+     }
+
+    if (fcmToken) {
+    await sendFCMPush(fcmToken, callId, channelName, callerUid, callerName);
+      }
+
 
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+}
+
+async function sendVoIPPush(voipToken, callId, channelName, callerUid, callerName) {
+  const message = {
+    token: voipToken,
+    data: {
+      callId,
+      channelName,
+      callerUid,
+      callerName,
+      type: "voip_incoming_call",
+    },
+    apns: {
+      headers: {
+        "apns-topic": "com.example.agora_callkit_video_call.voip", // Replace with your iOS app bundle ID
+        "apns-push-type": "voip",
+        "apns-priority": "10",
+      },
+      payload: {
+        aps: {
+          alert: { title: `${callerName} is calling`, body: "Incoming video call" },
+          badge: 1,
+          sound: "default",
+          "content-available": 1,
+        },
+      },
+    },
+  };
+
+  try {
+    await messaging.send(message);
+    console.log("✅ VoIP push sent");
+  } catch (error) {
+    console.error("❌ VoIP push error:", error);
+  }
+}
+
+async function sendFCMPush(fcmToken, callId, channelName, callerUid, callerName) {
+  const message = {
+    token: fcmToken,
+    notification: {
+      title: `${callerName} is calling`,
+      body: "Tap to answer video call",
+    },
+    data: {
+      callId,
+      channelName,
+      callerUid,
+      callerName,
+      type: "incoming_call",
+      click_action: "FLUTTER_NOTIFICATION_CLICK",
+    },
+    android: {
+      priority: "high",
+      notification: {
+        channelId: "calls",
+        priority: "max",
+        tag: callId,
+        clickAction: "FLUTTER_NOTIFICATION_CLICK",
+        visibility: "public",
+        sound: "default",
+      },
+      ttl: 60000,
+    },
+    apns: {
+      headers: {
+        "apns-priority": "10",
+      },
+      payload: {
+        aps: {
+          alert: { title: `${callerName} is calling`, body: "Tap to answer video call" },
+          badge: 1,
+          sound: "default",
+          category: "CALL_CATEGORY",
+          "content-available": 1,
+        },
+      },
+    },
+  };
+
+  try {
+    await messaging.send(message);
+    console.log("✅ FCM push sent");
+  } catch (error) {
+    console.error("❌ FCM push error:", error);
   }
 }
