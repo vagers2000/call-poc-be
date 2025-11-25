@@ -2,35 +2,46 @@ import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
 
-const ALLOWED_ORIGINS = ["https://flirtbate.web.app", "http://localhost:5173"]; // change as needed
+const ALLOWED_ORIGINS = ["https://flirtbate.web.app", "http://localhost:5173"]; // Replace with your frontend origins
 
 function setCorsHeaders(res, origin) {
   if (origin && ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
   } else {
-    res.setHeader("Access-Control-Allow-Origin", "null");
+    // Reject disallowed origins by not setting CORS headers or returning 403
+    return false;
   }
+
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
   res.setHeader("Access-Control-Allow-Credentials", "true");
+  // Optional: expose headers if your client needs them
+  res.setHeader("Access-Control-Expose-Headers", "Authorization,Content-Length");
+  return true;
 }
 
+// Initialize Firebase Admin SDK once
 if (!getApps().length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   initializeApp({ credential: cert(serviceAccount) });
 }
+
 const db = getFirestore();
 const messaging = getMessaging();
 
 export default async function handler(req, res) {
   const origin = req.headers.origin;
-  
+
+  // Handle CORS
+  const corsAllowed = setCorsHeaders(res, origin);
+  if (!corsAllowed) {
+    return res.status(403).json({ error: "CORS origin denied" });
+  }
+
+  // Respond to preflight requests
   if (req.method === "OPTIONS") {
-    setCorsHeaders(res, origin);
     return res.status(204).end();
   }
-  
-  setCorsHeaders(res, origin);
 
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
@@ -38,6 +49,7 @@ export default async function handler(req, res) {
 
   try {
     const { callId, channelName, callerUid, callerName, recipientId } = req.body;
+
     if (!callId || !channelName || !callerUid || !recipientId) {
       return res.status(400).json({ error: "Missing required fields" });
     }
@@ -52,6 +64,7 @@ export default async function handler(req, res) {
     const voipToken = recipientData?.voipToken;
     const platform = recipientData?.platform || "android";
 
+    // Create call document in Firestore
     await db.collection("calls").doc(callId).set({
       callId,
       channelName,
@@ -59,17 +72,17 @@ export default async function handler(req, res) {
       callerName: callerName || callerUid,
       recipientId,
       status: "ringing",
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
 
-    // VoIP Push for iOS
+    // Send VoIP push for iOS
     if (platform === "ios" && voipToken) {
       const voipMessage = {
         token: voipToken,
         data: { callId, channelName, callerUid, callerName, type: "voip_incoming_call" },
         apns: {
           headers: {
-            "apns-topic": "com.example.agora_callkit_video_call.voip",
+            "apns-topic": "com.example.agora_callkit_video_call.voip", // Change to your iOS bundle ID
             "apns-push-type": "voip",
             "apns-priority": "10",
           },
@@ -78,7 +91,7 @@ export default async function handler(req, res) {
               alert: { title: `${callerName} is calling`, body: "Incoming video call" },
               badge: 1,
               sound: "default",
-              "content-available": 1
+              "content-available": 1,
             },
           },
         },
@@ -91,7 +104,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // FCM Push for Android and iOS fallback
+    // Send FCM push for Android and fallback iOS
     if (fcmToken) {
       const fcmMessage = {
         token: fcmToken,
