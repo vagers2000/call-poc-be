@@ -1,17 +1,10 @@
 {
   "name": "call-poc-be",
   "version": "1.0.0",
-  "main": "server.js",
-  "license": "MIT",
-  "scripts": {
-    "start": "node index.js"
-  },
+  "private": true,
   "dependencies": {
-    "agora-access-token": "^2.0.4",
-    "agora-token": "^2.0.5",
-    "cors": "^2.8.5",
-    "dotenv": "^16.6.1",
-    "express": "^4.21.2"
+    "agora-access-token": "^3.3.1",
+    "firebase-admin": "^11.0.0"
   }
 }
 
