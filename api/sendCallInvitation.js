@@ -1,23 +1,22 @@
-// sendCallInvitation.updated.js
-// Updated to align with Dart FCMHelper behavior: accepts an optional `payload` object
-// and sends it inside `data` (stringified so values are strings), preserves VoIP & APNS
-// handling, and keeps robust CORS logic from the original.
+// sendCallInvitation.js - Updated for Agora integration
 
 import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
 
-// Initialize admin using service account JSON from env
 if (!getApps().length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || "{}");
   initializeApp({ credential: cert(serviceAccount) });
 }
+
 const db = getFirestore();
 const messaging = getMessaging();
 
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://flirtbate.web.app",
   "https://your-app.web.app",
+  "http://localhost:3000", // Added for local development
+  "http://localhost:5173", // Vite default port
 ];
 
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS
@@ -73,10 +72,10 @@ function buildCorsHeaders(origin, acrHeadersRaw = "") {
   if (DEBUG) {
     console.log("CORS build:", { origin, allowedFromEnv, allowLocal, requested, headers });
   }
+
   return headers;
 }
 
-// Helper: ensure all values in data map are strings (FCM requires string values in data)
 function normalizeDataMap(obj) {
   const out = {};
   if (!obj || typeof obj !== 'object') return out;
@@ -91,13 +90,18 @@ function normalizeDataMap(obj) {
 export default async function handler(req, res) {
   const origin = req.headers.origin;
   const acrHeadersRaw = req.headers["access-control-request-headers"] || "";
-
   const corsHeaders = buildCorsHeaders(origin, acrHeadersRaw);
   Object.entries(corsHeaders).forEach(([k, v]) => res.setHeader(k, v));
 
   if (req.method === "OPTIONS") {
     if (DEBUG) {
-      return res.status(204).json({ debug: true, message: "preflight", incomingOrigin: origin, acrHeaders: acrHeadersRaw, corsHeaders });
+      return res.status(204).json({ 
+        debug: true, 
+        message: "preflight", 
+        incomingOrigin: origin, 
+        acrHeaders: acrHeadersRaw, 
+        corsHeaders 
+      });
     }
     return res.status(204).end();
   }
@@ -113,19 +117,30 @@ export default async function handler(req, res) {
       callerUid,
       callerName,
       recipientId,
-      // optional: allow passing a full payload that maps to NotificationPayload.toJson in Dart
+      // ADDED: Agora-specific fields
+      agoraAppId,
+      agoraToken, // Optional: RTC token if using token authentication
+      callType = "video", // 'video' or 'audio'
       payload: incomingPayload,
     } = req.body || {};
 
     if (!callId || !channelName || !callerUid || !recipientId) {
       if (DEBUG) {
-        return res.status(400).json({ error: "Missing required fields", body: req.body, corsHeaders });
+        return res.status(400).json({ 
+          error: "Missing required fields", 
+          body: req.body, 
+          corsHeaders 
+        });
       }
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Fetch recipient by username (recipientId is treated as username)
-    const userQuery = await db.collection("user").where("username", "==", recipientId).limit(1).get();
+    // Fetch recipient by username
+    const userQuery = await db.collection("user")
+      .where("username", "==", recipientId)
+      .limit(1)
+      .get();
+
     if (userQuery.empty) {
       if (DEBUG) {
         console.log("Recipient not found (by username):", recipientId);
@@ -140,32 +155,55 @@ export default async function handler(req, res) {
     const voipToken = recipientData.voipToken;
     const platform = (recipientData.platform || "android").toLowerCase();
 
-    // Save call metadata
-    await db.collection("calls").doc(callId).set({
-      callId,
+    // Save call metadata to Firestore (for Agora)
+    await db.collection("room").doc(channelName).set({
       channelName,
+      callId,
       callerUid,
       callerName: callerName || callerUid,
       recipientId,
-      status: "ringing",
-      timestamp: Date.now(),
+      createdBy: callerUid,
+      createdAt: Date.now(),
+      isActive: true,
+      callType,
+      platform: 'web',
+      // ADDED: Store Agora info
+      agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
+      agoraToken: agoraToken || null,
     });
 
-    console.log("Call created:", { callId, channelName, callerUid, recipientId, platform });
+    console.log("Agora room created:", { 
+      channelName, 
+      callId, 
+      callerUid, 
+      recipientId, 
+      platform 
+    });
 
-    // Build a generic payload object merging core keys and any incoming payload
+    // Build payload for mobile app
     const basePayload = {
       callId,
       channelName,
+      webrtcRoomId: channelName, // Keep compatibility with Flutter app
       callerUid,
       callerName: callerName || callerUid,
-      callAction: incomingPayload?.callAction || "create",
+      userId: recipientData.userId || recipientId,
+      username: recipientId,
+      name: recipientData.name || recipientId,
+      imageUrl: recipientData.imageUrl || "",
+      fcmToken: fcmToken || "",
+      callAction: "join", // Mobile user joins the call
+      callType: callType,
+      // ADDED: Agora-specific data
+      agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
+      agoraToken: agoraToken || "",
+      agoraChannelName: channelName,
     };
 
     const mergedPayload = Object.assign({}, basePayload, incomingPayload || {});
     const dataMap = normalizeDataMap(mergedPayload);
 
-    // iOS VoIP push (APNs voip token) - preserve header requirements
+    // iOS VoIP push
     if (platform === "ios" && voipToken) {
       const voipMessage = {
         token: voipToken,
@@ -178,7 +216,10 @@ export default async function handler(req, res) {
           },
           payload: {
             aps: {
-              alert: { title: `${callerName || callerUid} is calling`, body: "Incoming video call" },
+              alert: { 
+                title: `${callerName || callerUid} is calling`, 
+                body: `Incoming ${callType} call` 
+              },
               badge: 1,
               sound: "default",
               "content-available": 1,
@@ -186,6 +227,7 @@ export default async function handler(req, res) {
           },
         },
       };
+
       try {
         const r = await messaging.send(voipMessage);
         console.log("VoIP push result:", r);
@@ -194,11 +236,14 @@ export default async function handler(req, res) {
       }
     }
 
-    // Regular FCM push (Android / iOS non-voip)
+    // Regular FCM push
     if (fcmToken) {
       const fcmMessage = {
         token: fcmToken,
-        notification: { title: `${callerName || callerUid} is calling`, body: "Tap to answer video call" },
+        notification: { 
+          title: `${callerName || callerUid} is calling`, 
+          body: `Tap to answer ${callType} call` 
+        },
         data: dataMap,
         android: {
           priority: "high",
@@ -214,7 +259,18 @@ export default async function handler(req, res) {
         },
         apns: {
           headers: { "apns-priority": "10" },
-          payload: { aps: { alert: { title: `${callerName || callerUid} is calling`, body: "Tap to answer video call" }, badge: 1, sound: "default", category: "CALL_CATEGORY", "content-available": 1 } },
+          payload: { 
+            aps: { 
+              alert: { 
+                title: `${callerName || callerUid} is calling`, 
+                body: `Tap to answer ${callType} call` 
+              }, 
+              badge: 1, 
+              sound: "default", 
+              category: "CALL_CATEGORY", 
+              "content-available": 1 
+            } 
+          },
         },
       };
 
@@ -229,14 +285,32 @@ export default async function handler(req, res) {
     }
 
     if (DEBUG) {
-      return res.status(200).json({ success: true, debug: { corsHeaders, incomingOrigin: origin, payloadSent: mergedPayload } });
+      return res.status(200).json({ 
+        success: true, 
+        debug: { 
+          corsHeaders, 
+          incomingOrigin: origin, 
+          payloadSent: mergedPayload,
+          channelName,
+        } 
+      });
     }
-    return res.status(200).json({ success: true });
+
+    return res.status(200).json({ 
+      success: true,
+      channelName,
+      callId,
+    });
   } catch (err) {
     console.error("Handler error:", err);
-    Object.entries(buildCorsHeaders(req.headers.origin, req.headers["access-control-request-headers"] || "")).forEach(([k,v]) => res.setHeader(k,v));
+    Object.entries(buildCorsHeaders(req.headers.origin, req.headers["access-control-request-headers"] || ""))
+      .forEach(([k,v]) => res.setHeader(k,v));
+    
     if (DEBUG) {
-      return res.status(500).json({ error: err.message || "Internal server error", stack: (err.stack||"").split("\n").slice(0,10) });
+      return res.status(500).json({ 
+        error: err.message || "Internal server error", 
+        stack: (err.stack||"").split("\n").slice(0,10) 
+      });
     }
     return res.status(500).json({ error: "Internal server error" });
   }
