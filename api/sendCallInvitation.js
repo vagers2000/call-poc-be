@@ -1,4 +1,4 @@
-// sendCallInvitation.js - Fixed for Android & iOS with comprehensive logging
+// sendCallInvitation.js - FIXED: FCM requires all string values
 
 import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
@@ -72,45 +72,21 @@ function buildCorsHeaders(origin, acrHeadersRaw = "") {
   return headers;
 }
 
-// ✅ Separate normalization for Android (all strings) and iOS (typed)
-function normalizeDataMapForAndroid(obj) {
+// ✅ FIXED: ALL data must be strings for FCM
+function normalizeDataMap(obj) {
   const out = {};
   if (!obj || typeof obj !== 'object') return out;
   
   Object.entries(obj).forEach(([k, v]) => {
     if (v === null || v === undefined) return;
+    
+    // Everything must be a string for FCM
     if (typeof v === 'string') {
       out[k] = v;
     } else if (typeof v === 'object') {
       out[k] = JSON.stringify(v);
     } else {
-      out[k] = String(v);
-    }
-  });
-  
-  return out;
-}
-
-function normalizeDataMapForIOS(obj) {
-  const out = {};
-  if (!obj || typeof obj !== 'object') return out;
-  
-  // Fields that must remain as numbers for iOS CallKit
-  const numericFields = ['type', 'duration'];
-  
-  Object.entries(obj).forEach(([k, v]) => {
-    if (v === null || v === undefined) return;
-    
-    // Keep numeric fields as actual numbers
-    if (numericFields.includes(k)) {
-      out[k] = typeof v === 'number' ? v : parseInt(v, 10) || 0;
-    }
-    // Stringify objects
-    else if (typeof v === 'object') {
-      out[k] = JSON.stringify(v);
-    }
-    // Keep strings and other primitives as strings
-    else {
+      // Convert numbers, booleans, etc. to strings
       out[k] = String(v);
     }
   });
@@ -120,7 +96,7 @@ function normalizeDataMapForIOS(obj) {
 
 export default async function handler(req, res) {
   const startTime = Date.now();
-  const logs = []; // Collect all logs
+  const logs = [];
   
   const log = (message, data = null) => {
     const logEntry = {
@@ -217,7 +193,6 @@ export default async function handler(req, res) {
     const platform = (recipientData.platform || "android").toLowerCase();
 
     log("✅ Recipient found", {
-      userId: recipientData.userId,
       username: recipientData.username,
       platform,
       hasFcmToken: !!fcmToken,
@@ -268,13 +243,13 @@ export default async function handler(req, res) {
       agoraToken: agoraToken || "",
       agoraChannelName: channelName,
       
-      // REQUIRED CallKit fields
+      // ✅ REQUIRED CallKit fields (will be converted to strings)
       id: callId,
       nameCaller: callerName || callerUid,
       avatar: recipientData.imageUrl || "",
       handle: callerUid,
-      type: callType === 'video' ? 1 : 0, // Integer for CallKit
-      duration: 30000, // Integer for CallKit
+      type: callType === 'video' ? 1 : 0, // Will become "1" or "0"
+      duration: 30000, // Will become "30000"
       textAccept: 'Accept',
       textDecline: 'Decline',
       missedCallNotification: {
@@ -290,12 +265,17 @@ export default async function handler(req, res) {
 
     const mergedPayload = Object.assign({}, basePayload, incomingPayload || {});
     
-    log("✅ Payload built", {
-      callId: mergedPayload.callId,
-      callType: mergedPayload.callType,
-      type: mergedPayload.type,
-      typeType: typeof mergedPayload.type,
-      callerName: mergedPayload.nameCaller,
+    // ✅ Convert ALL values to strings for FCM
+    const dataMap = normalizeDataMap(mergedPayload);
+    
+    log("✅ Payload built and normalized to strings", {
+      callId: dataMap.callId,
+      callType: dataMap.callType,
+      type: dataMap.type,
+      typeType: typeof dataMap.type,
+      duration: dataMap.duration,
+      durationType: typeof dataMap.duration,
+      callerName: dataMap.nameCaller,
     });
 
     const notificationResults = {
@@ -307,22 +287,21 @@ export default async function handler(req, res) {
     if (platform === "ios" && voipToken) {
       log("📱 Preparing iOS VoIP notification", { hasVoipToken: true });
       
-      // Use iOS-specific normalization
-      const iosData = normalizeDataMapForIOS(mergedPayload);
-      
-      log("🔍 iOS VoIP data types", {
-        type: iosData.type,
-        typeType: typeof iosData.type,
-        duration: iosData.duration,
-        durationType: typeof iosData.duration,
+      log("🔍 iOS VoIP data sample", {
+        type: dataMap.type,
+        typeType: typeof dataMap.type,
+        duration: dataMap.duration,
+        durationType: typeof dataMap.duration,
+        id: dataMap.id,
+        nameCaller: dataMap.nameCaller,
       });
       
       const voipMessage = {
         token: voipToken,
-        data: iosData,
+        data: dataMap, // ✅ All strings now
         apns: {
           headers: {
-            "apns-topic": process.env.APNS_VOIP_TOPIC || "com.example.app.voip",
+            "apns-topic": "bma.agora.poc.voip",
             "apns-push-type": "voip",
             "apns-priority": "10",
           },
@@ -362,10 +341,7 @@ export default async function handler(req, res) {
           code: e.code,
         };
       }
-    } else if (platform === "ios" && !voipToken) {
-      log("⚠️ iOS platform but no VoIP token available");
     }
-
     // Regular FCM push
     if (fcmToken) {
       log("📱 Preparing FCM notification", { 
@@ -373,17 +349,12 @@ export default async function handler(req, res) {
         hasFcmToken: true,
       });
       
-      // Use platform-specific normalization
-      const fcmData = platform === "ios" 
-        ? normalizeDataMapForIOS(mergedPayload)
-        : normalizeDataMapForAndroid(mergedPayload);
-      
-      log("🔍 FCM data types", {
+      log("🔍 FCM data sample", {
         platform,
-        type: fcmData.type,
-        typeType: typeof fcmData.type,
-        duration: fcmData.duration,
-        durationType: typeof fcmData.duration,
+        type: dataMap.type,
+        typeType: typeof dataMap.type,
+        duration: dataMap.duration,
+        durationType: typeof dataMap.duration,
       });
       
       const fcmMessage = {
@@ -392,7 +363,7 @@ export default async function handler(req, res) {
           title: `${callerName || callerUid} is calling`, 
           body: `Tap to answer ${callType} call` 
         },
-        data: fcmData,
+        data: dataMap, // ✅ All strings now
         android: {
           priority: "high",
           notification: {
@@ -407,7 +378,7 @@ export default async function handler(req, res) {
         },
         apns: {
           headers: { 
-            "apns-topic": "bma.agora.poc",
+            "apns-topic": "bma.agora.poc.voip",
             "apns-priority": "10",
             "apns-push-type": "voip",
           },
