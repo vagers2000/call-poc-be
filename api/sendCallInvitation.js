@@ -301,7 +301,7 @@ export default async function handler(req, res) {
         data: dataMap, // ✅ All strings now
         apns: {
           headers: {
-            "apns-topic": process.env.APNS_VOIP_TOPIC || "com.example.app.voip",
+            "apns-topic": "bma.agora.poc.voip",
             "apns-push-type": "voip",
             "apns-priority": "10",
           },
@@ -381,8 +381,9 @@ export default async function handler(req, res) {
         },
         apns: {
           headers: { 
+            "apns-topic": "bma.agora.poc.voip",
             "apns-priority": "10",
-            "apns-push-type": "alert",
+            "apns-push-type": "voip",
           },
           payload: { 
             aps: { 
