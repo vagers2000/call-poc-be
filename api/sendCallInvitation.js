@@ -1,5 +1,6 @@
-// sendCallInvitation.js - FIXED: FCM requires all string values
+// sendCallInvitation.js - FIXED: FCM requires all string values + token cleanup
 
+import admin from "firebase-admin";
 import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
@@ -84,7 +85,11 @@ function normalizeDataMap(obj) {
     if (typeof v === 'string') {
       out[k] = v;
     } else if (typeof v === 'object') {
-      out[k] = JSON.stringify(v);
+      try {
+        out[k] = JSON.stringify(v);
+      } catch (err) {
+        out[k] = String(v);
+      }
     } else {
       // Convert numbers, booleans, etc. to strings
       out[k] = String(v);
@@ -189,18 +194,19 @@ export default async function handler(req, res) {
     const recipientDoc = userQuery.docs[0];
     const recipientData = recipientDoc.data() || {};
     const fcmToken = recipientData.fcmToken;
+    const fcmTokensArray = Array.isArray(recipientData.fcmTokens) ? recipientData.fcmTokens : null;
     const voipToken = recipientData.voipToken;
     const platform = (recipientData.platform || "android").toLowerCase();
 
     log("✅ Recipient found", {
       username: recipientData.username,
       platform,
-      hasFcmToken: !!fcmToken,
+      hasFcmToken: !!fcmToken || (fcmTokensArray && fcmTokensArray.length > 0),
       hasVoipToken: !!voipToken,
-      fcmTokenPreview: fcmToken ? `${fcmToken.substring(0, 20)}...` : null,
+      fcmTokenPreview: fcmToken ? `${fcmToken.substring(0, 12)}...` : (fcmTokensArray ? `${String(fcmTokensArray.length)} tokens` : null),
     });
 
-    // Save call metadata to Firestore
+    // Save call metadata to Firestore - use server timestamp
     log("💾 Saving call metadata to Firestore", { channelName });
     
     await db.collection("room").doc(channelName).set({
@@ -210,7 +216,7 @@ export default async function handler(req, res) {
       callerName: callerName || callerUid,
       recipientId,
       createdBy: callerUid,
-      createdAt: Date.now(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
       isActive: true,
       callType,
       platform: 'web',
@@ -283,83 +289,187 @@ export default async function handler(req, res) {
       fcm: null,
     };
 
-    // Regular FCM push
-    if (fcmToken) {
-      log("📱 Preparing FCM notification", { 
-        platform,
-        hasFcmToken: true,
-      });
-      
-      log("🔍 FCM data sample", {
-        platform,
-        type: dataMap.type,
-        typeType: typeof dataMap.type,
-        duration: dataMap.duration,
-        durationType: typeof dataMap.duration,
-      });
-      
-      const fcmMessage = {
-        token: fcmToken,
-        notification: { 
-          title: `${callerName || callerUid} is calling`, 
-          body: `Tap to answer ${callType} call` 
-        },
-        data: dataMap, // ✅ All strings now
-        android: {
-          priority: "high",
-          notification: {
-            channelId: "calls",
-            priority: "high",
-            tag: callId,
-            clickAction: "FLUTTER_NOTIFICATION_CLICK",
-            visibility: "public",
-            sound: "default",
-          },
-          ttl: 60000,
-        },
-        apns: {
-          headers: { 
-            // "apns-topic": "bma.agora.poc.voip",
-            "apns-priority": "10",
-            "apns-push-type": "voip",
-          },
-          payload: { 
-            aps: { 
-              alert: { 
-                title: `${callerName || callerUid} is calling`, 
-                body: `Tap to answer ${callType} call` 
-              }, 
-              badge: 1, 
-              sound: "default", 
-              category: "CALL_CATEGORY", 
-              "content-available": 1,
-              "mutable-content": 1,
-            } 
-          },
-        },
-      };
+    // Choose token(s) to send to: prefer single fcmToken, else the array
+    const tokensToTry = fcmToken ? [fcmToken] : (fcmTokensArray ? fcmTokensArray.slice() : []);
 
-      try {
-        log("📤 Sending FCM notification...");
-        const fcmResult = await messaging.send(fcmMessage);
-        log("✅ FCM notification sent successfully", { messageId: fcmResult });
-        notificationResults.fcm = {
-          success: true,
-          messageId: fcmResult,
-          platform,
-          type: 'fcm',
+    if (tokensToTry.length > 0) {
+      // If more than one token, use sendMulticast for per-token feedback
+      if (tokensToTry.length > 1) {
+        const multicastMessage = {
+          tokens: tokensToTry,
+          notification: {
+            title: `${callerName || callerUid} is calling`,
+            body: `Tap to answer ${callType} call`,
+          },
+          data: dataMap,
+          android: {
+            priority: "high",
+            notification: {
+              channelId: "calls",
+              priority: "high",
+              tag: callId,
+              clickAction: "FLUTTER_NOTIFICATION_CLICK",
+              visibility: "public",
+              sound: "default",
+            },
+            ttl: 60000,
+          },
+          apns: {
+            headers: {
+              "apns-topic": process.env.APNS_TOPIC || "com.your.bundle.id",
+              "apns-priority": "10",
+              "apns-push-type": "voip",
+            },
+            payload: {
+              aps: {
+                alert: {
+                  title: `${callerName || callerUid} is calling`,
+                  body: `Tap to answer ${callType} call`,
+                },
+                badge: 1,
+                sound: "default",
+                category: "CALL_CATEGORY",
+                "content-available": 1,
+                "mutable-content": 1,
+              }
+            }
+          }
         };
-      } catch (e) {
-        log("❌ FCM notification failed", {
-          error: e.message,
-          code: e.code,
-          details: e.details,
-        });
-        notificationResults.fcm = {
-          success: false,
-          error: e.message,
-          code: e.code,
+
+        try {
+          log("📤 Sending FCM multicast...");
+          const multicastResp = await messaging.sendMulticast(multicastMessage);
+          log("✅ Multicast send complete", { successCount: multicastResp.successCount, failureCount: multicastResp.failureCount });
+          notificationResults.fcm = {
+            success: multicastResp.successCount > 0,
+            multicast: true,
+            successCount: multicastResp.successCount,
+            failureCount: multicastResp.failureCount,
+            responses: multicastResp.responses?.map((r, i) => ({ index: i, success: r.success, error: r.error?.code || null })) || [],
+          };
+
+          // cleanup invalid tokens from recipientDoc if any failures indicate invalid tokens
+          multicastResp.responses.forEach(async (r, idx) => {
+            if (!r.success && r.error && (r.error.code === "messaging/registration-token-not-registered" || r.error.code === "messaging/invalid-registration-token")) {
+              const badToken = tokensToTry[idx];
+              log("🧹 Removing invalid FCM token from recipient doc (multicast)", { tokenPreview: badToken?.substring(0,12) + "..." });
+              try {
+                const updates = {};
+                if (recipientData.fcmToken && recipientData.fcmToken === badToken) {
+                  updates.fcmToken = admin.firestore.FieldValue.delete();
+                }
+                if (fcmTokensArray) {
+                  updates.fcmTokens = admin.firestore.FieldValue.arrayRemove(badToken);
+                }
+                if (Object.keys(updates).length) {
+                  await recipientDoc.ref.update(updates);
+                  log("✅ Removed invalid token from Firestore (multicast)");
+                }
+              } catch (uErr) {
+                log("⚠️ Failed removing invalid token (multicast)", { error: uErr.message });
+              }
+            }
+          });
+
+        } catch (e) {
+          log("❌ FCM multicast failed", { error: e.message, code: e.code || null });
+          notificationResults.fcm = { success: false, error: e.message, code: e.code || null };
+        }
+
+      } else {
+        // single token path - use messaging.send
+        const singleToken = tokensToTry[0];
+        const fcmMessage = {
+          token: singleToken,
+          notification: { 
+            title: `${callerName || callerUid} is calling`, 
+            body: `Tap to answer ${callType} call` 
+          },
+          data: dataMap, // ✅ All strings now
+          android: {
+            priority: "high",
+            notification: {
+              channelId: "calls",
+              priority: "high",
+              tag: callId,
+              clickAction: "FLUTTER_NOTIFICATION_CLICK",
+              visibility: "public",
+              sound: "default",
+            },
+            ttl: 60000,
+          },
+          apns: {
+            headers: { 
+              "apns-topic": process.env.APNS_TOPIC || "com.your.bundle.id",
+              "apns-priority": "10",
+              "apns-push-type": "voip",
+            },
+            payload: { 
+              aps: { 
+                alert: { 
+                  title: `${callerName || callerUid} is calling`, 
+                  body: `Tap to answer ${callType} call` 
+                }, 
+                badge: 1, 
+                sound: "default", 
+                category: "CALL_CATEGORY", 
+                "content-available": 1,
+                "mutable-content": 1,
+              } 
+            },
+          },
         };
+
+        try {
+          log("📤 Sending FCM notification...");
+          const fcmResult = await messaging.send(fcmMessage);
+          log("✅ FCM notification sent successfully", { messageId: fcmResult });
+          notificationResults.fcm = {
+            success: true,
+            messageId: fcmResult,
+            platform,
+            type: 'fcm',
+          };
+        } catch (e) {
+          log("❌ FCM notification failed", {
+            error: e.message,
+            code: e.code || null,
+            details: e.details || null,
+          });
+
+          // If token invalid / not registered, remove it from Firestore
+          const invalidCodes = [
+            "messaging/registration-token-not-registered",
+            "messaging/invalid-registration-token"
+          ];
+
+          try {
+            if (e.code && invalidCodes.includes(e.code)) {
+              const badToken = singleToken;
+              log("🧹 Removing invalid FCM token from recipient doc", { tokenPreview: badToken?.substring(0,12) + "..." });
+
+              const updates = {};
+              if (recipientData.fcmToken && recipientData.fcmToken === badToken) {
+                updates.fcmToken = admin.firestore.FieldValue.delete();
+              }
+              if (fcmTokensArray) {
+                updates.fcmTokens = admin.firestore.FieldValue.arrayRemove(badToken);
+              }
+              if (Object.keys(updates).length) {
+                await recipientDoc.ref.update(updates);
+                log("✅ Token removed from Firestore");
+              }
+            }
+          } catch (updateErr) {
+            log("⚠️ Failed to remove invalid token from Firestore", { error: updateErr.message });
+          }
+
+          notificationResults.fcm = {
+            success: false,
+            error: e.message,
+            code: e.code || null,
+          };
+        }
       }
     } else {
       log("⚠️ No FCM token available for recipient", { recipientId });
