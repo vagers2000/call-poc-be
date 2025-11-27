@@ -101,7 +101,7 @@ function normalizeDataMap(obj) {
 async function sendApnsVoipPush(voipToken, payload, callType, callerName, callId) {
   let notification = new apn.Notification();
 
-  notification.topic = `${process.env.IOS_BUNDLE_ID}.voip`; // Your iOS app bundle id + `.voip` suffix
+  notification.topic = `bma.agora.poc.voip`; // Your iOS app bundle id + `.voip` suffix
   notification.pushType = "voip";
   notification.contentAvailable = 1;
   notification.sound = "default";
