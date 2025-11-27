@@ -1,13 +1,21 @@
-// sendCallInvitation.updated.js
-// Updated to align with Dart FCMHelper behavior: accepts an optional `payload` object
-// and sends it inside `data` (stringified so values are strings), preserves VoIP & APNS
-// handling, and keeps robust CORS logic from the original.
-
+// pages/api/sendCallInvitationOld.js
 import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
 
-// Initialize admin using service account JSON from env
+/**
+ * sendCallInvitationOld API (Vercel / Next.js)
+ * - Robust CORS (allows any http://localhost:PORT automatically for dev)
+ * - Adds support for custom headers like x-vercel-protection-bypass
+ * - DEBUG_CORS=true will return helpful debug JSON for OPTIONS and failures
+ *
+ * Env:
+ * - FIREBASE_SERVICE_ACCOUNT  => JSON string
+ * - ALLOWED_ORIGINS (optional) => comma-separated list (exact origins)
+ * - DEBUG_CORS (optional "true")
+ * - APNS_VOIP_TOPIC (optional)
+ */
+
 if (!getApps().length) {
   const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || "{}");
   initializeApp({ credential: cert(serviceAccount) });
@@ -18,6 +26,7 @@ const messaging = getMessaging();
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://flirtbate.web.app",
   "https://your-app.web.app",
+  // You can add your deployed frontend origin(s) here
 ];
 
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS
@@ -29,9 +38,11 @@ const DEBUG = process.env.DEBUG_CORS === "true";
 
 function isLocalhostOrigin(origin) {
   if (!origin) return false;
+  // allow http(s)://localhost(:port)? and http(s)://127.0.0.1(:port)?
   return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
 }
 
+// Build CORS headers: echoes the origin if allowed, allows localhost patterns, and includes requested headers + defaults
 function buildCorsHeaders(origin, acrHeadersRaw = "") {
   const headers = {};
   const requested = acrHeadersRaw
@@ -42,24 +53,25 @@ function buildCorsHeaders(origin, acrHeadersRaw = "") {
   const allowLocal = isLocalhostOrigin(origin);
 
   if (origin && (allowedFromEnv || allowLocal)) {
-    headers["Access-Control-Allow-Origin"] = origin;
+    headers["Access-Control-Allow-Origin"] = origin; // must echo exact origin for credentials
     headers["Access-Control-Allow-Credentials"] = "true";
   } else if (!origin) {
     headers["Access-Control-Allow-Origin"] = "*";
   } else {
-    headers["Access-Control-Allow-Origin"] = "null";
+    headers["Access-Control-Allow-Origin"] = "null"; // browser will block
   }
 
   headers["Vary"] = "Origin";
   headers["Access-Control-Allow-Methods"] = "POST,OPTIONS";
 
+  // Default allowed headers (lowercase)
   const defaultAllowedHeaders = [
     "content-type",
     "authorization",
     "x-requested-with",
     "x-client-id",
     "x-firebase-locale",
-    "x-vercel-protection-bypass",
+    "x-vercel-protection-bypass", // your custom header
   ];
 
   const set = new Set([
@@ -76,46 +88,35 @@ function buildCorsHeaders(origin, acrHeadersRaw = "") {
   return headers;
 }
 
-// Helper: ensure all values in data map are strings (FCM requires string values in data)
-function normalizeDataMap(obj) {
-  const out = {};
-  if (!obj || typeof obj !== 'object') return out;
-  Object.entries(obj).forEach(([k, v]) => {
-    if (v === null || v === undefined) return;
-    if (typeof v === 'string') out[k] = v;
-    else out[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
-  });
-  return out;
-}
-
 export default async function handler(req, res) {
   const origin = req.headers.origin;
   const acrHeadersRaw = req.headers["access-control-request-headers"] || "";
 
+  // set CORS headers on every response
   const corsHeaders = buildCorsHeaders(origin, acrHeadersRaw);
   Object.entries(corsHeaders).forEach(([k, v]) => res.setHeader(k, v));
 
+  // Preflight
   if (req.method === "OPTIONS") {
     if (DEBUG) {
-      return res.status(204).json({ debug: true, message: "preflight", incomingOrigin: origin, acrHeaders: acrHeadersRaw, corsHeaders });
+      return res.status(204).json({
+        debug: true,
+        message: "preflight",
+        incomingOrigin: origin,
+        acrHeaders: acrHeadersRaw,
+        corsHeaders,
+      });
     }
     return res.status(204).end();
   }
 
+  // Only POST allowed
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   try {
-    const {
-      callId,
-      channelName,
-      callerUid,
-      callerName,
-      recipientId,
-      // optional: allow passing a full payload that maps to NotificationPayload.toJson in Dart
-      payload: incomingPayload,
-    } = req.body || {};
+    const { callId, channelName, callerUid, callerName, recipientId } = req.body || {};
 
     if (!callId || !channelName || !callerUid || !recipientId) {
       if (DEBUG) {
@@ -124,7 +125,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Fetch recipient document
+    // Fetch recipient
     const recipientDoc = await db.collection("users").doc(recipientId).get();
     if (!recipientDoc.exists) {
       if (DEBUG) {
@@ -139,7 +140,6 @@ export default async function handler(req, res) {
     const voipToken = recipientData.voipToken;
     const platform = (recipientData.platform || "android").toLowerCase();
 
-    // Save call metadata
     await db.collection("calls").doc(callId).set({
       callId,
       channelName,
@@ -152,23 +152,10 @@ export default async function handler(req, res) {
 
     console.log("Call created:", { callId, channelName, callerUid, recipientId, platform });
 
-    // Build a generic payload object merging core keys and any incoming payload
-    const basePayload = {
-      callId,
-      channelName,
-      callerUid,
-      callerName: callerName || callerUid,
-      callAction: incomingPayload?.callAction || "create",
-    };
-
-    const mergedPayload = Object.assign({}, basePayload, incomingPayload || {});
-    const dataMap = normalizeDataMap(mergedPayload);
-
-    // iOS VoIP push (APNs voip token) - preserve header requirements
     if (platform === "ios" && voipToken) {
       const voipMessage = {
         token: voipToken,
-        data: dataMap,
+        data: { callId, channelName, callerUid, callerName: callerName || callerUid, type: "voip_incoming_call" },
         apns: {
           headers: {
             "apns-topic": process.env.APNS_VOIP_TOPIC || "com.example.app.voip",
@@ -193,30 +180,14 @@ export default async function handler(req, res) {
       }
     }
 
-    // Regular FCM push (Android / iOS non-voip)
     if (fcmToken) {
       const fcmMessage = {
         token: fcmToken,
         notification: { title: `${callerName || callerUid} is calling`, body: "Tap to answer video call" },
-        data: dataMap,
-        android: {
-          priority: "high",
-          notification: {
-            channelId: "calls",
-            priority: "max",
-            tag: callId,
-            click_action: "FLUTTER_NOTIFICATION_CLICK",
-            visibility: "public",
-            sound: "default",
-          },
-          ttl: 60000,
-        },
-        apns: {
-          headers: { "apns-priority": "10" },
-          payload: { aps: { alert: { title: `${callerName || callerUid} is calling`, body: "Tap to answer video call" }, badge: 1, sound: "default", category: "CALL_CATEGORY", "content-available": 1 } },
-        },
+        data: { callId, channelName, callerUid, callerName: callerName || callerUid, type: "incoming_call", click_action: "FLUTTER_NOTIFICATION_CLICK" },
+        android: { priority: "high", notification: { channelId: "calls", priority: "max", tag: callId, click_action: "FLUTTER_NOTIFICATION_CLICK", visibility: "public", sound: "default" }, ttl: 60000 },
+        apns: { headers: { "apns-priority": "10" }, payload: { aps: { alert: { title: `${callerName || callerUid} is calling`, body: "Tap to answer video call" }, badge: 1, sound: "default", category: "CALL_CATEGORY", "content-available": 1 } } },
       };
-
       try {
         const r = await messaging.send(fcmMessage);
         console.log("FCM push result:", r);
@@ -227,13 +198,15 @@ export default async function handler(req, res) {
       console.warn("No FCM token for recipient", recipientId);
     }
 
+    // Success
     if (DEBUG) {
-      return res.status(200).json({ success: true, debug: { corsHeaders, incomingOrigin: origin, payloadSent: mergedPayload } });
+      return res.status(200).json({ success: true, debug: { corsHeaders, incomingOrigin: origin } });
     }
     return res.status(200).json({ success: true });
   } catch (err) {
     console.error("Handler error:", err);
-    Object.entries(buildCorsHeaders(req.headers.origin, req.headers["access-control-request-headers"] || "")).forEach(([k,v]) => res.setHeader(k,v));
+    // ensure CORS headers in error
+    Object.entries(buildCorsHeaders(origin, acrHeadersRaw)).forEach(([k,v]) => res.setHeader(k,v));
     if (DEBUG) {
       return res.status(500).json({ error: err.message || "Internal server error", stack: (err.stack||"").split("\n").slice(0,10) });
     }
