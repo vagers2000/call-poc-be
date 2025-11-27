@@ -18,10 +18,8 @@ const apnProvider = new apn.Provider({
     keyId: '8C9AMXZAS5',
     teamId:  '9XVM2G2KN9',
   },
-  production: process.env.APN_PRODUCTION === 'true', // true for prod, false for dev
+  production: process.env.APN_PRODUCTION === 'true',
 });
-
-
 
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://flirtbate.web.app",
@@ -35,7 +33,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS
   : DEFAULT_ALLOWED_ORIGINS
 );
 
-const DEBUG = process.env.DEBUG_CORS === "true";
+const DEBUG = process.env.DEBUG_CORS === "true" || true; // ✅ ALWAYS DEBUG
 
 function isLocalhostOrigin(origin) {
   if (!origin) return false;
@@ -81,7 +79,7 @@ function buildCorsHeaders(origin, acrHeadersRaw = "") {
   headers["Access-Control-Max-Age"] = "3600";
 
   if (DEBUG) {
-    console.log("CORS build:", { origin, allowedFromEnv, allowLocal, requested, headers });
+    console.log("🔧 CORS build:", { origin, allowedFromEnv, allowLocal, requested, headers });
   }
 
   return headers;
@@ -99,53 +97,63 @@ function normalizeDataMap(obj) {
 }
 
 async function sendApnsVoipPush(voipToken, payload, callType, callerName, callId) {
+  console.log("🚀 SENDING VoIP PUSH:");
+  console.log("   Token:", voipToken ? voipToken.substring(0, 20) + "..." : "MISSING");
+  console.log("   CallId:", callId);
+  console.log("   Caller:", callerName);
+  
   let notification = new apn.Notification();
 
-  notification.topic = `bma.agora.poc.voip`; // Your iOS app bundle id + `.voip` suffix
+  notification.topic = `bma.agora.poc.voip`;
   notification.pushType = "voip";
-  notification.contentAvailable = 1;
-  notification.sound = "default";
   
+  // ✅ FIXED: Root-level CallKit fields REQUIRED by flutter_callkit_incoming
+  notification.payload = {
+    id: callId,
+    nameCaller: callerName || "Caller",
+    handle: payload.handle || callId,
+    type: payload.type || 1,
+    extra: payload.extra || {}
+  };
+
   notification.alert = {
     title: `${callerName || "Caller"} is calling`,
-    body: `Tap to answer ${callType || "video"} call`,
+    body: `Tap to answer ${callType || "video"} call`
   };
 
   notification.badge = 1;
+  notification.sound = "default";
   notification.category = "CALL_CATEGORY";
-  
-  notification.payload = payload;
+
+  console.log("📱 VoIP Payload:", JSON.stringify(notification.payload, null, 2));
+  console.log("📡 Topic:", notification.topic);
 
   try {
     const result = await apnProvider.send(notification, voipToken);
-    console.log("VoIP push sent:", result);
+    console.log("✅ VoIP SUCCESS:", result);
+    return result;
   } catch (err) {
-    console.error("Error sending VoIP push:", err);
+    console.error("❌ VoIP FAILED:", err);
+    console.error("   Code:", err.status || err.code);
+    console.error("   Reason:", err.reason || err.message);
+    throw err;
   }
 }
 
 export default async function handler(req, res) {
   const origin = req.headers.origin;
-  const acrHeadersRaw = req.headers["access-control-request-headers"] || "";
-  const corsHeaders = buildCorsHeaders(origin, acrHeadersRaw);
+  const corsHeaders = buildCorsHeaders(origin);
   Object.entries(corsHeaders).forEach(([k, v]) => res.setHeader(k, v));
 
   if (req.method === "OPTIONS") {
-    if (DEBUG) {
-      return res.status(204).json({
-        debug: true,
-        message: "preflight",
-        incomingOrigin: origin,
-        acrHeaders: acrHeadersRaw,
-        corsHeaders,
-      });
-    }
     return res.status(204).end();
   }
 
   if (req.method !== "POST") {
     return res.status(405).json({ error: "Method not allowed" });
   }
+
+  console.log("📥 CALL INVITATION REQUEST:", JSON.stringify(req.body, null, 2));
 
   try {
     const {
@@ -160,28 +168,25 @@ export default async function handler(req, res) {
       payload: incomingPayload,
     } = req.body || {};
 
+    console.log("📋 Parsed params:", { callId, channelName, callerUid, callerName, recipientId });
+
     if (!callId || !channelName || !callerUid || !recipientId) {
-      if (DEBUG) {
-        return res.status(400).json({
-          error: "Missing required fields",
-          body: req.body,
-          corsHeaders,
-        });
-      }
-      return res.status(400).json({ error: "Missing required fields" });
+      console.error("❌ MISSING REQUIRED FIELDS");
+      return res.status(400).json({ 
+        error: "Missing required fields",
+        received: req.body 
+      });
     }
 
-    // Fetch recipient by username
+    // Fetch recipient
+    console.log("🔍 Looking up recipient:", recipientId);
     const userQuery = await db.collection("user")
       .where("username", "==", recipientId)
       .limit(1)
       .get();
 
     if (userQuery.empty) {
-      if (DEBUG) {
-        console.log("Recipient not found (by username):", recipientId);
-        return res.status(404).json({ error: "Recipient not found", corsHeaders });
-      }
+      console.error("❌ Recipient NOT FOUND:", recipientId);
       return res.status(404).json({ error: "Recipient not found" });
     }
 
@@ -191,151 +196,92 @@ export default async function handler(req, res) {
     const voipToken = recipientData.voipToken;
     const platform = (recipientData.platform || "android").toLowerCase();
 
-    // Save call metadata to Firestore
+    console.log("👤 Recipient found:", {
+      username: recipientId,
+      platform,
+      hasFCM: !!fcmToken,
+      hasVoIP: !!voipToken,
+      fcmToken: fcmToken ? fcmToken.substring(0, 20) + "..." : null,
+      voipToken: voipToken ? voipToken.substring(0, 20) + "..." : null
+    });
+
+    // Save room
     await db.collection("room").doc(channelName).set({
-      channelName,
-      callId,
-      callerUid,
-      callerName: callerName || callerUid,
-      recipientId,
-      createdBy: callerUid,
-      createdAt: Date.now(),
-      isActive: true,
-      callType,
-      platform: "web",
+      channelName, callId, callerUid, callerName: callerName || callerUid,
+      recipientId, createdBy: callerUid, createdAt: Date.now(),
+      isActive: true, callType, platform: "web",
       agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
       agoraToken: agoraToken || null,
     });
+    console.log("✅ Room saved:", channelName);
 
-    console.log("Agora room created:", {
-      channelName,
-      callId,
-      callerUid,
-      recipientId,
-      platform,
-    });
-
-    // Base CallKit payload fields
+    // Build CallKit payload
     const basePayload = {
-      callId,
-      channelName,
-      webrtcRoomId: channelName,
-      callerUid,
-      callerName: callerName || callerUid,
-      userId: recipientData.userId || recipientId,
-      username: recipientId,
-      name: recipientData.name || recipientId,
-      imageUrl: recipientData.imageUrl || "",
-      fcmToken: fcmToken || "",
-      callAction: "join",
-      callType: callType,
-
-      agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
-      agoraToken: agoraToken || "",
-      agoraChannelName: channelName,
-
       id: callId,
       nameCaller: callerName || callerUid,
-      avatar: recipientData.imageUrl || "",
       handle: callerUid,
       type: callType === "video" ? 1 : 0,
-      duration: 30000,
-      textAccept: "Accept",
-      textDecline: "Decline",
-      missedCallNotification: {
-        showNotification: true,
-        count: 1,
-      },
       extra: {
         agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
         agoraToken: agoraToken || "",
         channelName: channelName,
-      },
+        callerUid,
+        recipientId
+      }
     };
 
     const mergedPayload = Object.assign({}, basePayload, incomingPayload || {});
-    const dataMap = normalizeDataMap(mergedPayload);
+
+    console.log("📦 CallKit Payload:", JSON.stringify(mergedPayload, null, 2));
+
+    let pushResult = null;
 
     if (platform === "ios" && voipToken) {
-      // Send direct APNs VoIP push
-      await sendApnsVoipPush(voipToken, mergedPayload, callType, callerName, callId);
+      console.log("📱 iOS + VoIP token → Sending APNs VoIP");
+      pushResult = await sendApnsVoipPush(voipToken, mergedPayload, callType, callerName, callId);
     } else if (fcmToken) {
-      // Send regular FCM push
+      console.log("📱 FCM token → Sending FCM");
       const fcmMessage = {
         token: fcmToken,
         notification: {
           title: `${callerName || callerUid} is calling`,
           body: `Tap to answer ${callType} call`,
         },
-        data: dataMap,
-        android: {
-          priority: "high",
-          notification: {
-            channelId: "calls",
-            priority: "high",
-            tag: callId,
-            click_action: "FLUTTER_NOTIFICATION_CLICK",
-            visibility: "public",
-            sound: "default",
-          },
-          ttl: 60000,
-        },
-        apns: {
-          headers: { "apns-priority": "10" },
-          payload: {
-            aps: {
-              alert: {
-                title: `${callerName || callerUid} is calling`,
-                body: `Tap to answer ${callType} call`,
-              },
-              badge: 1,
-              sound: "default",
-              category: "CALL_CATEGORY",
-              "content-available": 1,
-            },
-          },
-        },
+        data: normalizeDataMap(mergedPayload),
+        android: { priority: "high", ttl: 60000 },
+        apns: { headers: { "apns-priority": "10" } }
       };
-
-      try {
-        const result = await messaging.send(fcmMessage);
-        console.log("FCM push sent result:", result);
-      } catch (e) {
-        console.error("FCM push error:", e);
-      }
+      
+      pushResult = await messaging.send(fcmMessage);
+      console.log("✅ FCM sent:", pushResult);
     } else {
-      console.warn("No token (FCM or VoIP) available for recipient", recipientId);
+      console.error("❌ NO TOKENS FOUND for:", recipientId);
     }
 
-    if (DEBUG) {
-      return res.status(200).json({
-        success: true,
-        debug: {
-          corsHeaders,
-          incomingOrigin: origin,
-          payloadSent: mergedPayload,
-          channelName,
-        },
-      });
-    }
+    console.log("🎉 CALL INVITATION COMPLETE:", { pushResult, channelName, callId });
 
     return res.status(200).json({
       success: true,
       channelName,
       callId,
+      recipient: {
+        platform,
+        hasFCM: !!fcmToken,
+        hasVoIP: !!voipToken,
+        pushResult: pushResult ? pushResult.messageId || pushResult : null
+      },
+      debug: {
+        recipientTokens: { fcmToken: !!fcmToken, voipToken: !!voipToken },
+        payloadSent: mergedPayload
+      }
     });
-  } catch (err) {
-    console.error("Handler error:", err);
-    Object.entries(
-      buildCorsHeaders(req.headers.origin, req.headers["access-control-request-headers"] || "")
-    ).forEach(([k, v]) => res.setHeader(k, v));
 
-    if (DEBUG) {
-      return res.status(500).json({
-        error: err.message || "Internal server error",
-        stack: (err.stack || "").split("\n").slice(0, 10),
-      });
-    }
-    return res.status(500).json({ error: "Internal server error" });
+  } catch (err) {
+    console.error("💥 FULL ERROR:", err);
+    return res.status(500).json({ 
+      error: err.message,
+      stack: err.stack?.split("\n").slice(0, 5),
+      body: req.body 
+    });
   }
 }
