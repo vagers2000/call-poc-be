@@ -14,9 +14,9 @@ const messaging = getMessaging();
 // Init APNs provider for VoIP pushes
 const apnProvider = new apn.Provider({
   token: {
-    key: process.env.APN_AUTH_KEY_PATH || 'api/AuthKey_8C9AMXZAS5.p8', // Your .p8 file path
-    keyId: process.env.APN_KEY_ID || '8C9AMXZAS5',
-    teamId: process.env.APN_TEAM_ID || '9XVM2G2KN9',
+    key: Buffer.from(process.env.APN_P8_KEY_BASE64, "base64").toString("utf8"),
+    keyId: '8C9AMXZAS5',
+    teamId:  '9XVM2G2KN9',
   },
   production: process.env.APN_PRODUCTION === 'true', // true for prod, false for dev
 });
