@@ -1,5 +1,4 @@
-// sendCallInvitation.js - FIXED: FCM requires all string values
-
+// sendCallInvitation.js - FCM-only (APNS removed)
 import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { getMessaging } from "firebase-admin/messaging";
@@ -72,21 +71,23 @@ function buildCorsHeaders(origin, acrHeadersRaw = "") {
   return headers;
 }
 
-// ✅ FIXED: ALL data must be strings for FCM
+// Ensure every value is a string (required by FCM data map)
 function normalizeDataMap(obj) {
   const out = {};
   if (!obj || typeof obj !== 'object') return out;
   
   Object.entries(obj).forEach(([k, v]) => {
     if (v === null || v === undefined) return;
-    
-    // Everything must be a string for FCM
+
     if (typeof v === 'string') {
       out[k] = v;
     } else if (typeof v === 'object') {
-      out[k] = JSON.stringify(v);
+      try {
+        out[k] = JSON.stringify(v);
+      } catch (e) {
+        out[k] = String(v);
+      }
     } else {
-      // Convert numbers, booleans, etc. to strings
       out[k] = String(v);
     }
   });
@@ -97,7 +98,6 @@ function normalizeDataMap(obj) {
 export default async function handler(req, res) {
   const startTime = Date.now();
   const logs = [];
-  
   const log = (message, data = null) => {
     const logEntry = {
       timestamp: new Date().toISOString(),
@@ -151,7 +151,6 @@ export default async function handler(req, res) {
       hasAgoraToken: !!agoraToken,
     });
 
-    // Validate required fields
     if (!callId || !channelName || !callerUid || !recipientId) {
       log("❌ Missing required fields", {
         hasCallId: !!callId,
@@ -169,9 +168,8 @@ export default async function handler(req, res) {
 
     log("✅ All required fields present");
 
-    // Fetch recipient by username
+    // Fetch recipient by username (not doc id)
     log("🔍 Fetching recipient from Firestore", { username: recipientId });
-    
     const userQuery = await db.collection("user")
       .where("username", "==", recipientId)
       .limit(1)
@@ -202,7 +200,6 @@ export default async function handler(req, res) {
 
     // Save call metadata to Firestore
     log("💾 Saving call metadata to Firestore", { channelName });
-    
     await db.collection("room").doc(channelName).set({
       channelName,
       callId,
@@ -217,14 +214,10 @@ export default async function handler(req, res) {
       agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
       agoraToken: agoraToken || null,
     });
-
     log("✅ Call metadata saved to Firestore");
 
-    // Build proper CallKit payload
-    log("📦 Building notification payload");
-    
+    // Build payload (all values will be converted to strings)
     const basePayload = {
-      // Core call data
       callId,
       channelName,
       webrtcRoomId: channelName,
@@ -236,20 +229,16 @@ export default async function handler(req, res) {
       imageUrl: recipientData.imageUrl || "",
       fcmToken: fcmToken || "",
       callAction: "join",
-      callType: callType,
-      
-      // Agora-specific
-      agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
+      callType,
+      agoraAppId: agoraAppId || process.env.AGORA_APP_ID || "",
       agoraToken: agoraToken || "",
       agoraChannelName: channelName,
-      
-      // ✅ REQUIRED CallKit fields (will be converted to strings)
       id: callId,
       nameCaller: callerName || callerUid,
       avatar: recipientData.imageUrl || "",
       handle: callerUid,
-      type: callType === 'video' ? 1 : 0, // Will become "1" or "0"
-      duration: 30000, // Will become "30000"
+      type: callType === 'video' ? 1 : 0,
+      duration: 30000,
       textAccept: 'Accept',
       textDecline: 'Decline',
       missedCallNotification: {
@@ -257,17 +246,15 @@ export default async function handler(req, res) {
         count: 1,
       },
       extra: {
-        agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
+        agoraAppId: agoraAppId || process.env.AGORA_APP_ID || "",
         agoraToken: agoraToken || "",
         channelName: channelName,
       },
     };
 
     const mergedPayload = Object.assign({}, basePayload, incomingPayload || {});
-    
-    // ✅ Convert ALL values to strings for FCM
     const dataMap = normalizeDataMap(mergedPayload);
-    
+
     log("✅ Payload built and normalized to strings", {
       callId: dataMap.callId,
       callType: dataMap.callType,
@@ -278,95 +265,24 @@ export default async function handler(req, res) {
       callerName: dataMap.nameCaller,
     });
 
-    const notificationResults = {
-      voip: null,
-      fcm: null,
-    };
+    const notificationResults = { fcm: null };
 
-    // iOS VoIP push (if available)
-    if (platform === "ios" && voipToken) {
-      log("📱 Preparing iOS VoIP notification", { hasVoipToken: true });
-      
-      log("🔍 iOS VoIP data sample", {
-        type: dataMap.type,
-        typeType: typeof dataMap.type,
-        duration: dataMap.duration,
-        durationType: typeof dataMap.duration,
-        id: dataMap.id,
-        nameCaller: dataMap.nameCaller,
-      });
-      
-      const voipMessage = {
-        token: voipToken,
-        data: dataMap, // ✅ All strings now
-        apns: {
-          headers: {
-            "apns-topic": "bma.agora.poc.voip",
-            "apns-push-type": "voip",
-            "apns-priority": "10",
-          },
-          payload: {
-            aps: {
-              alert: { 
-                title: `${callerName || callerUid} is calling`, 
-                body: `Incoming ${callType} call` 
-              },
-              badge: 1,
-              sound: "default",
-              "content-available": 1,
-            },
-          },
-        },
-      };
-
-      try {
-        log("📤 Sending iOS VoIP notification...");
-        const voipResult = await messaging.send(voipMessage);
-        log("✅ iOS VoIP notification sent successfully", { messageId: voipResult });
-        notificationResults.voip = {
-          success: true,
-          messageId: voipResult,
-          platform: 'ios',
-          type: 'voip',
-        };
-      } catch (e) {
-        log("❌ iOS VoIP notification failed", {
-          error: e.message,
-          code: e.code,
-          details: e.details,
-        });
-        notificationResults.voip = {
-          success: false,
-          error: e.message,
-          code: e.code,
-        };
-      }
-    } else if (platform === "ios" && !voipToken) {
-      log("⚠️ iOS platform but no VoIP token available");
-    }
-
-    // Regular FCM push
+    // Send a data-only message (recommended for cross-platform background handling).
+    // For Android we also include a notification block so a visible notification appears if app is backgrounded.
     if (fcmToken) {
-      log("📱 Preparing FCM notification", { 
-        platform,
-        hasFcmToken: true,
-      });
-      
-      log("🔍 FCM data sample", {
-        platform,
-        type: dataMap.type,
-        typeType: typeof dataMap.type,
-        duration: dataMap.duration,
-        durationType: typeof dataMap.duration,
-      });
-      
+      log("📱 Preparing FCM notification (FCM-only, no APNs fields)", { platform, hasFcmToken: true });
+
+      // Basic "notification" payload for Android visible notification; keep it minimal.
+      const notificationBlock = (platform === "android" ? {
+        title: `${callerName || callerUid} is calling`,
+        body: `Tap to answer ${callType} call`
+      } : undefined);
+
       const fcmMessage = {
         token: fcmToken,
-        notification: { 
-          title: `${callerName || callerUid} is calling`, 
-          body: `Tap to answer ${callType} call` 
-        },
-        data: dataMap, // ✅ All strings now
+        // include notification for Android; iOS will rely on data payload (and your app's handling)
+        ...(notificationBlock ? { notification: notificationBlock } : {}),
+        data: dataMap, // ALL strings
         android: {
           priority: "high",
           notification: {
@@ -379,30 +295,11 @@ export default async function handler(req, res) {
           },
           ttl: 60000,
         },
-        apns: {
-          headers: { 
-            "apns-topic": "bma.agora.poc.voip",
-            "apns-priority": "10",
-            "apns-push-type": "voip",
-          },
-          payload: { 
-            aps: { 
-              alert: { 
-                title: `${callerName || callerUid} is calling`, 
-                body: `Tap to answer ${callType} call` 
-              }, 
-              badge: 1, 
-              sound: "default", 
-              category: "CALL_CATEGORY", 
-              "content-available": 1,
-              "mutable-content": 1,
-            } 
-          },
-        },
+        // removed apns entirely to rely on FCM-only path
       };
 
       try {
-        log("📤 Sending FCM notification...");
+        log("📤 Sending FCM notification via messaging.send()");
         const fcmResult = await messaging.send(fcmMessage);
         log("✅ FCM notification sent successfully", { messageId: fcmResult });
         notificationResults.fcm = {
@@ -432,13 +329,11 @@ export default async function handler(req, res) {
     }
 
     const duration = Date.now() - startTime;
-    
     log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     log("✅ Call Invitation Request Completed", { durationMs: duration });
     log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
-    // Determine overall success
-    const overallSuccess = notificationResults.voip?.success || notificationResults.fcm?.success;
+    const overallSuccess = notificationResults.fcm?.success || false;
 
     return res.status(200).json({ 
       success: overallSuccess,
@@ -447,7 +342,6 @@ export default async function handler(req, res) {
       platform,
       notifications: notificationResults,
       summary: {
-        voipSent: notificationResults.voip?.success || false,
         fcmSent: notificationResults.fcm?.success || false,
         recipient: recipientId,
         caller: callerName || callerUid,
@@ -459,7 +353,6 @@ export default async function handler(req, res) {
 
   } catch (err) {
     const duration = Date.now() - startTime;
-    
     log("💥 CRITICAL ERROR", {
       error: err.message,
       stack: err.stack?.split("\n").slice(0, 5),
