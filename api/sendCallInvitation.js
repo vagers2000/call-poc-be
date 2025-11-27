@@ -283,65 +283,6 @@ export default async function handler(req, res) {
       fcm: null,
     };
 
-    // iOS VoIP push (if available)
-    if (platform === "ios" && voipToken) {
-      log("📱 Preparing iOS VoIP notification", { hasVoipToken: true });
-      
-      log("🔍 iOS VoIP data sample", {
-        type: dataMap.type,
-        typeType: typeof dataMap.type,
-        duration: dataMap.duration,
-        durationType: typeof dataMap.duration,
-        id: dataMap.id,
-        nameCaller: dataMap.nameCaller,
-      });
-      
-      const voipMessage = {
-        token: voipToken,
-        data: dataMap, // ✅ All strings now
-        apns: {
-          headers: {
-            "apns-topic": "bma.agora.poc.voip",
-            "apns-push-type": "voip",
-            "apns-priority": "10",
-          },
-          payload: {
-            aps: {
-              alert: { 
-                title: `${callerName || callerUid} is calling`, 
-                body: `Incoming ${callType} call` 
-              },
-              badge: 1,
-              sound: "default",
-              "content-available": 1,
-            },
-          },
-        },
-      };
-
-      try {
-        log("📤 Sending iOS VoIP notification...");
-        const voipResult = await messaging.send(voipMessage);
-        log("✅ iOS VoIP notification sent successfully", { messageId: voipResult });
-        notificationResults.voip = {
-          success: true,
-          messageId: voipResult,
-          platform: 'ios',
-          type: 'voip',
-        };
-      } catch (e) {
-        log("❌ iOS VoIP notification failed", {
-          error: e.message,
-          code: e.code,
-          details: e.details,
-        });
-        notificationResults.voip = {
-          success: false,
-          error: e.message,
-          code: e.code,
-        };
-      }
-    }
     // Regular FCM push
     if (fcmToken) {
       log("📱 Preparing FCM notification", { 
@@ -368,7 +309,7 @@ export default async function handler(req, res) {
           priority: "high",
           notification: {
             channelId: "calls",
-            priority: "max",
+            priority: "high",
             tag: callId,
             clickAction: "FLUTTER_NOTIFICATION_CLICK",
             visibility: "public",
