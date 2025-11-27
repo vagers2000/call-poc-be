@@ -319,7 +319,7 @@ export default async function handler(req, res) {
         },
         apns: {
           headers: { 
-            "apns-topic": "bma.agora.poc.voip",
+            // "apns-topic": "bma.agora.poc.voip",
             "apns-priority": "10",
             "apns-push-type": "voip",
           },
