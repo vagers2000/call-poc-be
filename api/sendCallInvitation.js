@@ -341,10 +341,7 @@ export default async function handler(req, res) {
           code: e.code,
         };
       }
-    } else if (platform === "ios" && !voipToken) {
-      log("⚠️ iOS platform but no VoIP token available");
     }
-
     // Regular FCM push
     if (fcmToken) {
       log("📱 Preparing FCM notification", { 
