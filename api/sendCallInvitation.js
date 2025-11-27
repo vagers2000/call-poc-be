@@ -221,6 +221,8 @@ export default async function handler(req, res) {
       nameCaller: callerName || callerUid,
       handle: callerUid,
       type: callType === "video" ? 1 : 0,
+      callAction: "create",  // Add this field explicitly
+
       extra: {
         agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
         agoraToken: agoraToken || "",
