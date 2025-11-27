@@ -1,4 +1,4 @@
-// sendCallInvitation.js - Updated for Agora integration
+// sendCallInvitation.js - Updated with proper CallKit fields
 
 import { initializeApp, cert, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
@@ -15,8 +15,8 @@ const messaging = getMessaging();
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://flirtbate.web.app",
   "https://your-app.web.app",
-  "http://localhost:3000", // Added for local development
-  "http://localhost:5173", // Vite default port
+  "http://localhost:3000",
+  "http://localhost:5173",
 ];
 
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS
@@ -117,10 +117,9 @@ export default async function handler(req, res) {
       callerUid,
       callerName,
       recipientId,
-      // ADDED: Agora-specific fields
       agoraAppId,
-      agoraToken, // Optional: RTC token if using token authentication
-      callType = "video", // 'video' or 'audio'
+      agoraToken,
+      callType = "video",
       payload: incomingPayload,
     } = req.body || {};
 
@@ -155,7 +154,7 @@ export default async function handler(req, res) {
     const voipToken = recipientData.voipToken;
     const platform = (recipientData.platform || "android").toLowerCase();
 
-    // Save call metadata to Firestore (for Agora)
+    // Save call metadata to Firestore
     await db.collection("room").doc(channelName).set({
       channelName,
       callId,
@@ -167,7 +166,6 @@ export default async function handler(req, res) {
       isActive: true,
       callType,
       platform: 'web',
-      // ADDED: Store Agora info
       agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
       agoraToken: agoraToken || null,
     });
@@ -180,11 +178,12 @@ export default async function handler(req, res) {
       platform 
     });
 
-    // Build payload for mobile app
+    // ✅ Build proper CallKit payload
     const basePayload = {
+      // Core call data
       callId,
       channelName,
-      webrtcRoomId: channelName, // Keep compatibility with Flutter app
+      webrtcRoomId: channelName,
       callerUid,
       callerName: callerName || callerUid,
       userId: recipientData.userId || recipientId,
@@ -192,12 +191,32 @@ export default async function handler(req, res) {
       name: recipientData.name || recipientId,
       imageUrl: recipientData.imageUrl || "",
       fcmToken: fcmToken || "",
-      callAction: "join", // Mobile user joins the call
+      callAction: "join",
       callType: callType,
-      // ADDED: Agora-specific data
+      
+      // Agora-specific
       agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
       agoraToken: agoraToken || "",
       agoraChannelName: channelName,
+      
+      // ✅ REQUIRED CallKit fields
+      id: callId,
+      nameCaller: callerName || callerUid,
+      avatar: recipientData.imageUrl || "",
+      handle: callerUid,
+      type: callType === 'video' ? 1 : 0,
+      duration: 30000,
+      textAccept: 'Accept',
+      textDecline: 'Decline',
+      missedCallNotification: {
+        showNotification: true,
+        count: 1,
+      },
+      extra: {
+        agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
+        agoraToken: agoraToken || "",
+        channelName: channelName,
+      },
     };
 
     const mergedPayload = Object.assign({}, basePayload, incomingPayload || {});
@@ -224,6 +243,11 @@ export default async function handler(req, res) {
               sound: "default",
               "content-available": 1,
             },
+            // Include call data in root payload
+            id: callId,
+            nameCaller: callerName || callerUid,
+            handle: callerUid,
+            type: callType === 'video' ? 1 : 0,
           },
         },
       };
