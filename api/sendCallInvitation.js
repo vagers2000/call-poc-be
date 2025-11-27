@@ -124,16 +124,17 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "Missing required fields" });
     }
 
-    // Fetch recipient document
-    const recipientDoc = await db.collection("users").doc(recipientId).get();
-    if (!recipientDoc.exists) {
+    // Fetch recipient by username (recipientId is treated as username)
+    const userQuery = await db.collection("user").where("username", "==", recipientId).limit(1).get();
+    if (userQuery.empty) {
       if (DEBUG) {
-        console.log("Recipient not found:", recipientId);
+        console.log("Recipient not found (by username):", recipientId);
         return res.status(404).json({ error: "Recipient not found", corsHeaders });
       }
       return res.status(404).json({ error: "Recipient not found" });
     }
 
+    const recipientDoc = userQuery.docs[0];
     const recipientData = recipientDoc.data() || {};
     const fcmToken = recipientData.fcmToken;
     const voipToken = recipientData.voipToken;
