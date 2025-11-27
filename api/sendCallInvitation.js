@@ -178,7 +178,7 @@ export default async function handler(req, res) {
       platform 
     });
 
-    
+
     // ✅ Build proper CallKit payload
     const basePayload = {
       // Core call data
@@ -223,44 +223,6 @@ export default async function handler(req, res) {
     const mergedPayload = Object.assign({}, basePayload, incomingPayload || {});
     const dataMap = normalizeDataMap(mergedPayload);
 
-    // iOS VoIP push
-    if (platform === "ios" && voipToken) {
-      const voipMessage = {
-        token: voipToken,
-        data: dataMap,
-        apns: {
-          headers: {
-            "apns-topic": process.env.APNS_VOIP_TOPIC || "com.example.app.voip",
-            "apns-push-type": "voip",
-            "apns-priority": "10",
-          },
-          payload: {
-            aps: {
-              alert: { 
-                title: `${callerName || callerUid} is calling`, 
-                body: `Incoming ${callType} call` 
-              },
-              badge: 1,
-              sound: "default",
-              "content-available": 1,
-            },
-            // Include call data in root payload
-            id: callId,
-            nameCaller: callerName || callerUid,
-            handle: callerUid,
-            type: callType === 'video' ? 1 : 0,
-          },
-        },
-      };
-
-      try {
-        const r = await messaging.send(voipMessage);
-        console.log("VoIP push result:", r);
-      } catch (e) {
-        console.error("VoIP push error:", e);
-      }
-    }
-
     // Regular FCM push
     if (fcmToken) {
       const fcmMessage = {
@@ -274,7 +236,7 @@ export default async function handler(req, res) {
           priority: "high",
           notification: {
             channelId: "calls",
-            priority: "max",
+            priority: "high",
             tag: callId,
             click_action: "FLUTTER_NOTIFICATION_CLICK",
             visibility: "public",
