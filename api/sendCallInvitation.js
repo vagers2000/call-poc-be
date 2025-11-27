@@ -222,11 +222,14 @@ export default async function handler(req, res) {
       handle: callerUid,
       type: callType === "video" ? 1 : 0,
       callAction: "create",  // Add this field explicitly
+      roomId:channelName,
+      channelName: channelName,
 
       extra: {
         agoraAppId: agoraAppId || process.env.AGORA_APP_ID,
         agoraToken: agoraToken || "",
         channelName: channelName,
+        roomId:channelName,
         callerUid,
         recipientId
       }
