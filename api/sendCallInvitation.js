@@ -22,6 +22,7 @@ const apnProvider = new apn.Provider({
 });
 
 
+
 const DEFAULT_ALLOWED_ORIGINS = [
   "https://flirtbate.web.app",
   "https://your-app.web.app",
